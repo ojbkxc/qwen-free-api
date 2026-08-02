@@ -1,39 +1,12 @@
 # Qwen AI Free 服务
 
-![](https://img.shields.io/github/license/llm-red-team/qwen-free-api.svg)
-![](https://img.shields.io/github/stars/llm-red-team/qwen-free-api.svg)
-![](https://img.shields.io/github/forks/llm-red-team/qwen-free-api.svg)
-![](https://img.shields.io/docker/pulls/vinlic/qwen-free-api.svg)
-
-支持高速流式输出、支持多轮对话、支持无水印AI绘图、支持长文档解读、图像解析，零配置部署，多路token支持，自动清理会话痕迹。
-
-与ChatGPT接口完全兼容。
-
-还有以下五个free-api欢迎关注：
-
-Moonshot AI（Kimi.ai）接口转API [kimi-free-api](https://github.com/LLM-Red-Team/kimi-free-api)
-
-阶跃星辰 (跃问StepChat) 接口转API [step-free-api](https://github.com/LLM-Red-Team/step-free-api)
-
-ZhipuAI (智谱清言) 接口转API [glm-free-api](https://github.com/LLM-Red-Team/glm-free-api)
-
-秘塔AI (metaso) 接口转API [metaso-free-api](https://github.com/LLM-Red-Team/metaso-free-api)
-
-聆心智能 (Emohaa) 接口转API [emohaa-free-api](https://github.com/LLM-Red-Team/emohaa-free-api)
-
 ## 声明
-
-仅限自用，禁止对外提供服务或商用，避免对官方造成服务压力，否则风险自担！
-
-仅限自用，禁止对外提供服务或商用，避免对官方造成服务压力，否则风险自担！
 
 仅限自用，禁止对外提供服务或商用，避免对官方造成服务压力，否则风险自担！
 
 ## 目录
 
 * [声明](#声明)
-* [在线体验](#在线体验)
-* [效果示例](#效果示例)
 * [接入准备](#接入准备)
 * [Docker部署](#Docker部署)
   * [Docker-compose部署](#Docker-compose部署)
@@ -48,44 +21,6 @@ ZhipuAI (智谱清言) 接口转API [glm-free-api](https://github.com/LLM-Red-Te
   * [login_tongyi_ticket存活检测](#login_tongyi_ticket存活检测)
 * [注意事项](#注意事项)
   * [Nginx反代优化](#Nginx反代优化)
-
-## 在线体验
-
-此链接仅临时测试功能，长期使用请自行部署。
-
-https://udify.app/chat/qOXzVl5kkvhQXM8r
-
-## 测试接口
-
-此接口实例部署在[Render](#Render部署)上面，遇到容器回收可能导致响应速度较慢，仅供测试，建议自行部署。
-
-https://qwen-free-api.onrender.com
-
-## 效果示例
-
-### 验明正身Demo
-
-![验明正身](./doc/example-1.png)
-
-### 多轮对话Demo
-
-![多轮对话](./doc/example-2.png)
-
-### AI绘图Demo
-
-![AI绘图](./doc/example-3.png)
-
-### 长文档解读Demo
-
-![AI绘图](./doc/example-5.png)
-
-### 图像解析Demo
-
-![AI绘图](./doc/example-6.png)
-
-### 10线程并发测试
-
-![10线程并发测试](./doc/example-4.png)
 
 ## 接入准备
 
@@ -169,7 +104,7 @@ services:
 ```shell
 npm i -g vercel --registry http://registry.npmmirror.com
 vercel login
-git clone https://github.com/LLM-Red-Team/qwen-free-api
+git clone https://github.com/ojbkxc/qwen-free-api
 cd qwen-free-api
 vercel --prod
 ```
@@ -359,7 +294,7 @@ Authorization: Bearer [refresh_token]
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": "文档中包含了四个古代魔法仪式或咒语的描述，它们似乎旨在影响或控制一个特定女性的情感和行为，使其对施术者产生强烈的爱意。以下是每个仪式的具体内容：\n\n1. **仪式一**（PMG 4.1390 – 1495）：\n   - 施术者需留下一些面包，将其掰成七小块。\n   - 前往一处英雄、角斗士或其他暴力死亡者丧生的地方。\n   - 对着面包碎片念诵咒语后丢弃，并从该地取一些受污染的泥土扔进目标女性的住所。\n   - 咒语内容包括向命运三女神（Moirai）、罗马版的命运女神（Fates）、自然力量（Daemons）、饥荒与嫉妒之神以及非正常死亡者献祭食物，并请求他们以痛苦折磨目标，使她在梦中惊醒，心生忧虑与恐惧，最终跟随施术者的步伐并顺从其意愿。此过程以赫卡忒（Hecate）女神为命令的源泉。\n\n2. **仪式二**（PMG 4.1342 – 57）：\n   - 施术者召唤恶魔（Daemon），通过一系列神秘的神祇名号（如Erekisephthe Araracharara Ephthesikere）要求其将名为Tereous的女子（Apia所生）带至施术者Didymos（Taipiam所生）身边。\n   - 请求该女子在灵魂、心智及女性器官上遭受剧烈痛苦，直至她主动找寻Didymos并与之紧密相连（唇对唇、发对发、腹部对腹部）。整个过程要求立即执行。\n\n3. **仪式三**（PGM 4.1265 – 74）：\n   - 揭示了阿佛洛狄忒（Aphrodite）鲜为人知的名字——NEPHERIĒRI[nfr-iry-t]。\n   - 如果想赢得一位美丽女子的芳心，施术者应保持三天纯净，献上乳香，并在心中默念该名字七次。\n   - 这样的做法需持续七天，据说这样便能成功吸引女子。\n\n4. **仪式四**（PGM 4.1496 – 1）：\n   - 施术者在燃烧的煤炭上供奉没药（myrrh），同时念诵咒语。\n   - 咒语将没药称为“苦涩的调和者”、“热力的激发者”，并命令它前往指定的女子（及其母亲的名字）处，阻止她进行日常活动（如坐、饮、食、注视他人、亲吻他人），迫使她心中只有施术者，对其产生强烈的欲望与爱意。\n   - 咒语还指示没药直接穿透女子的灵魂，驻留在其心中，焚烧其内脏、胸部、肝脏、气息、骨骼、骨髓，直到她来到施术者身边。\n\n这些仪式反映了古代魔法实践中试图借助超自然力量操控他人情感与行为的企图，涉及对神灵、恶魔、神秘名字及特定物质（如面包、泥土、乳香、没药）的运用，通常伴随着严格的仪式规程和咒语念诵。此类行为在现代伦理和法律框架下被视为不恰当甚至违法，且缺乏科学依据。"
+                "content": "文档中包含了四个古代魔法仪式或咒语的描述..."
             },
             "finish_reason": "stop"
         }
@@ -422,7 +357,7 @@ Authorization: Bearer [refresh_token]
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": "图像展示了通义千问的标志，一个紫色的六边形和一个蓝色的三角形，以及“通义千问”四个白色的汉字。"
+                "content": "图像展示了通义千问的标志，一个紫色的六边形和一个蓝色的三角形，以及"通义千问"四个白色的汉字。"
             },
             "finish_reason": "stop"
         }
@@ -478,7 +413,3 @@ keepalive_timeout 120;
 ### Token统计
 
 由于推理侧不在qwen-free-api，因此token不可统计，将以固定数字返回。
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=LLM-Red-Team/qwen-free-api&type=Date)](https://star-history.com/#LLM-Red-Team/qwen-free-api&Date)
