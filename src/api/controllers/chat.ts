@@ -114,7 +114,7 @@ async function createCompletion(
     req.write(
       JSON.stringify({
         mode: "chat",
-        model: model,
+        model: "",
         action: "next",
         userAction: "chat",
         requestId: util.uuid(false),
@@ -196,7 +196,7 @@ async function createCompletionStream(
     req.write(
       JSON.stringify({
         mode: "chat",
-        model: model,
+        model: "",
         action: "next",
         userAction: "chat",
         requestId: util.uuid(false),
@@ -256,7 +256,7 @@ async function generateImages(
     const result = await axios.post(
       "https://qianwen.biz.aliyun.com/dialog/conversation",
       {
-        model: model,
+        model: "",
         action: "next",
         mode: "chat",
         userAction: "chat",
@@ -355,10 +355,10 @@ function messagesPrepare(messages: any[], refs: any[] = []) {
     if (_.isArray(message.content)) {
       return message.content.reduce((_content, v) => {
         if (!_.isObject(v) || v["type"] != "text") return _content;
-        return _content + `<|im_start|>${message.role}\n${v["text"] || ""}<|im_end|>\n`;
+        return _content + `<|im_start|>${message.role || "user"}\n${v["text"] || ""}<|im_end|>\n`;
       }, content);
     }
-    return (content += `<|im_start|>${message.role}\n${
+    return (content += `<|im_start|>${message.role || "user"}\n${
       message.content
     }<|im_end|>\n`);
   }, "");
