@@ -1,6 +1,6 @@
 import { URL } from "url";
 import { PassThrough } from "stream";
-import http2 from "http2";
+import https from "https";
 import path from "path";
 import _ from "lodash";
 import mime from "mime";
@@ -12,6 +12,7 @@ import EX from "@/api/consts/exceptions.ts";
 import { createParser } from "eventsource-parser";
 import logger from "@/lib/logger.ts";
 import util from "@/lib/util.ts";
+import qiansign from "@/api/qiansign.ts";
 
 // 模型名称
 const MODEL_NAME = "qwen";
@@ -19,27 +20,8 @@ const MODEL_NAME = "qwen";
 const MAX_RETRY_COUNT = 3;
 // 重试延迟
 const RETRY_DELAY = 5000;
-// 伪装headers
-const FAKE_HEADERS = {
-  Accept: "application/json, text/plain, */*",
-  "Accept-Encoding": "gzip, deflate, br, zstd",
-  "Accept-Language": "zh-CN,zh;q=0.9",
-  "Cache-Control": "no-cache",
-  Origin: "https://tongyi.aliyun.com",
-  Pragma: "no-cache",
-  "Sec-Ch-Ua":
-    '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-  "Sec-Ch-Ua-Mobile": "?0",
-  "Sec-Ch-Ua-Platform": '"Windows"',
-  "Sec-Fetch-Dest": "empty",
-  "Sec-Fetch-Mode": "cors",
-  "Sec-Fetch-Site": "same-site",
-  Referer: "https://tongyi.aliyun.com/",
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-  "X-Platform": "pc_tongyi",
-  "X-Xsrf-Token": "48b9ee49-a184-45e2-9f67-fa87213edcdc",
-};
+// 新版对话接口主机
+const CHAT_HOST = "chat2.qianwen.com";
 // 文件最大大小
 const FILE_MAX_SIZE = 100 * 1024 * 1024;
 
@@ -48,7 +30,7 @@ const FILE_MAX_SIZE = 100 * 1024 * 1024;
  *
  * 在对话流传输完毕后移除会话，避免创建的会话出现在用户的对话列表中
  *
- * @param ticket login_tongyi_ticket值
+ * @param ticket tongyi_sso_ticket值
  */
 async function removeConversation(convId: string, ticket: string) {
   const result = await axios.post(
@@ -58,8 +40,9 @@ async function removeConversation(convId: string, ticket: string) {
     },
     {
       headers: {
-        Cookie: generateCookie(ticket),
-        ...FAKE_HEADERS,
+        Cookie: `login_tongyi_ticket=${ticket}`,
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
       },
       timeout: 15000,
       validateStatus: () => true,
@@ -73,7 +56,7 @@ async function removeConversation(convId: string, ticket: string) {
  *
  * @param model 模型名称
  * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
- * @param ticket login_tongyi_ticket值
+ * @param ticket tongyi_sso_ticket值
  * @param retryCount 重试次数
  */
 async function createCompletion(
@@ -82,63 +65,27 @@ async function createCompletion(
   ticket: string,
   retryCount = 0
 ) {
-  let session: http2.ClientHttp2Session;
   return (async () => {
     logger.info(messages);
 
-    // 提取引用文件URL并上传qwen获得引用的文件ID列表
-    const refFileUrls = extractRefFileUrls(messages);
-    const refs = refFileUrls.length
-      ? await Promise.all(
-          refFileUrls.map((fileUrl) => uploadFile(fileUrl, ticket))
-        )
-      : [];
+    const { reqId, sessionId } = qiansign.generateIds();
+    const { query } = messagesPrepare(messages);
+    const body = buildRequestBody(reqId, sessionId, query);
 
-    // 请求流
-    const session: http2.ClientHttp2Session = await new Promise(
-      (resolve, reject) => {
-        const session = http2.connect("https://qianwen.biz.aliyun.com");
-        session.on("connect", () => resolve(session));
-        session.on("error", reject);
-      }
+    const { path, body: bodyStr, headers } = await qiansign.signChatRequest(
+      ticket,
+      body
     );
-    const req = session.request({
-      ":method": "POST",
-      ":path": "/dialog/conversation",
-      "Content-Type": "application/json",
-      Cookie: generateCookie(ticket),
-      ...FAKE_HEADERS,
-      Accept: "text/event-stream",
-    });
-    req.setTimeout(120000);
-    req.write(
-      JSON.stringify({
-        mode: "chat",
-        model: "",
-        action: "next",
-        userAction: "chat",
-        requestId: util.uuid(false),
-        sessionId: "",
-        sessionType: "text_chat",
-        parentMsgId: "",
-        contents: messagesPrepare(messages, refs),
-      })
-    );
-    req.setEncoding("utf8");
+
+    const stream = await requestChatStream(path, bodyStr, headers);
     const streamStartTime = util.timestamp();
-    // 接收流为输出文本
-    const answer = await receiveStream(req);
-    session.close();
+    const answer = await receiveStream(stream);
     logger.success(
       `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
     );
 
-    // 异步移除会话，如果消息不合规，此操作可能会抛出数据库错误异常，请忽略
-    removeConversation(answer.id, ticket).catch((err) => console.error(err));
-
     return answer;
   })().catch((err) => {
-    session && session.close();
     if (retryCount < MAX_RETRY_COUNT) {
       logger.error(`Stream response error: ${err.message}`);
       logger.warn(`Try again after ${RETRY_DELAY / 1000}s...`);
@@ -152,12 +99,93 @@ async function createCompletion(
 }
 
 /**
+ * 构造新版接口请求体
+ */
+function buildRequestBody(reqId: string, sessionId: string, query: string) {
+  return {
+    req_id: reqId,
+    parent_req_id: "0",
+    messages: [
+      {
+        mime_type: "text/plain",
+        content: query,
+        meta_data: { ori_query: query },
+        status: "complete",
+      },
+    ],
+    scene: "chat",
+    sub_scene: "",
+    scene_param: "first_turn",
+    session_id: sessionId,
+    biz_id: "ai_qwen",
+    topic_id: reqId,
+    model: "Qwen",
+    from: "default",
+    protocol_version: "v2",
+    messages_merge: false,
+    chat_client: "h5",
+    deep_search: null,
+    temporary: false,
+    chat_mode: "quick",
+    bucket: {},
+  };
+}
+
+/**
+ * 发起chat2 API请求并返回响应流
+ */
+function requestChatStream(path: string, bodyStr: string, headers: any) {
+  return new Promise<PassThrough>((resolve, reject) => {
+    const req = https.request(
+      {
+        host: CHAT_HOST,
+        path,
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Length": Buffer.byteLength(bodyStr),
+        },
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          let errData = "";
+          res.on("data", (chunk) => (errData += chunk));
+          res.on("end", () =>
+            reject(
+              new Error(
+                `chat2 API响应错误: [${res.statusCode}] ${errData.substring(0, 300)}`
+              )
+            )
+          );
+          return;
+        }
+        res.setEncoding("utf8");
+        // 透传为标准流供上层解析
+        const transStream = new PassThrough();
+        res.on("data", (chunk) => transStream.write(chunk));
+        res.on("end", () => transStream.end());
+        res.on("error", (err) => {
+          transStream.emit("error", err);
+          transStream.end();
+        });
+        resolve(transStream);
+      }
+    );
+    req.setTimeout(120000, () => {
+      req.destroy(new Error("chat2 API请求超时"));
+    });
+    req.on("error", reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
+/**
  * 流式对话补全
  *
  * @param model 模型名称
  * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
- * @param ticket login_tongyi_ticket值
- * @param useSearch 是否开启联网搜索
+ * @param ticket tongyi_sso_ticket值
  * @param retryCount 重试次数
  */
 async function createCompletionStream(
@@ -166,60 +194,27 @@ async function createCompletionStream(
   ticket: string,
   retryCount = 0
 ) {
-  let session: http2.ClientHttp2Session;
   return (async () => {
     logger.info(messages);
 
-    // 提取引用文件URL并上传qwen获得引用的文件ID列表
-    const refFileUrls = extractRefFileUrls(messages);
-    const refs = refFileUrls.length
-      ? await Promise.all(
-          refFileUrls.map((fileUrl) => uploadFile(fileUrl, ticket))
-        )
-      : [];
+    const { reqId, sessionId } = qiansign.generateIds();
+    const { query } = messagesPrepare(messages);
+    const body = buildRequestBody(reqId, sessionId, query);
 
-    // 请求流
-    session = await new Promise((resolve, reject) => {
-      const session = http2.connect("https://qianwen.biz.aliyun.com");
-      session.on("connect", () => resolve(session));
-      session.on("error", reject);
-    });
-    const req = session.request({
-      ":method": "POST",
-      ":path": "/dialog/conversation",
-      "Content-Type": "application/json",
-      Cookie: generateCookie(ticket),
-      ...FAKE_HEADERS,
-      Accept: "text/event-stream",
-    });
-    req.setTimeout(120000);
-    req.write(
-      JSON.stringify({
-        mode: "chat",
-        model: "",
-        action: "next",
-        userAction: "chat",
-        requestId: util.uuid(false),
-        sessionId: "",
-        sessionType: "text_chat",
-        parentMsgId: "",
-        contents: messagesPrepare(messages, refs),
-      })
+    const { path, body: bodyStr, headers } = await qiansign.signChatRequest(
+      ticket,
+      body
     );
-    req.setEncoding("utf8");
+
+    const stream = await requestChatStream(path, bodyStr, headers);
     const streamStartTime = util.timestamp();
     // 创建转换流将消息格式转换为gpt兼容格式
-    return createTransStream(req, (convId: string) => {
-      // 关闭请求会话
-      session.close();
+    return createTransStream(stream, () => {
       logger.success(
         `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
       );
-      // 流传输结束后异步移除会话，如果消息不合规，此操作可能会抛出数据库错误异常，请忽略
-      removeConversation(convId, ticket).catch((err) => console.error(err));
     });
   })().catch((err) => {
-    session && session.close();
     if (retryCount < MAX_RETRY_COUNT) {
       logger.error(`Stream response error: ${err.message}`);
       logger.warn(`Try again after ${RETRY_DELAY / 1000}s...`);
@@ -252,40 +247,23 @@ async function generateImages(
       },
       { role: "user", content: prompt },
     ];
-    // 创建会话并获得流
-    const result = await axios.post(
-      "https://qianwen.biz.aliyun.com/dialog/conversation",
-      {
-        model: "",
-        action: "next",
-        mode: "chat",
-        userAction: "chat",
-        requestId: util.uuid(false),
-        sessionId: "",
-        sessionType: "text_chat",
-        parentMsgId: "",
-        contents: messagesPrepare(messages),
-      },
-      {
-        headers: {
-          Cookie: generateCookie(ticket),
-          ...FAKE_HEADERS,
-          Accept: "text/event-stream",
-        },
-        timeout: 120000,
-        validateStatus: () => true,
-        responseType: "stream",
-      }
+    // 通过新版接口请求绘图
+    const { reqId, sessionId } = qiansign.generateIds();
+    const { query } = messagesPrepare(messages);
+    const body = {
+      ...buildRequestBody(reqId, sessionId, query),
+      chat_mode: "draw",
+    };
+    const { path, body: bodyStr, headers } = await qiansign.signChatRequest(
+      ticket,
+      body
     );
+    const stream = await requestChatStream(path, bodyStr, headers);
     const streamStartTime = util.timestamp();
-    // 接收流为输出文本
-    const { convId, imageUrls } = await receiveImages(result.data);
+    const { convId, imageUrls } = await receiveImages(stream);
     logger.success(
       `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
     );
-
-    // 异步移除会话，如果消息不合规，此操作可能会抛出数据库错误异常，请忽略
-    removeConversation(convId, ticket).catch((err) => console.error(err));
 
     if (imageUrls.length == 0)
       throw new APIException(EX.API_IMAGE_GENERATION_FAILED);
@@ -350,8 +328,8 @@ function extractRefFileUrls(messages: any[]) {
  *
  * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
  */
-function messagesPrepare(messages: any[], refs: any[] = []) {
-  const content = messages.reduce((content, message) => {
+function messagesPrepare(messages: any[]) {
+  const query = messages.reduce((content, message) => {
     if (_.isArray(message.content)) {
       return message.content.reduce((_content, v) => {
         if (!_.isObject(v) || v["type"] != "text") return _content;
@@ -362,15 +340,8 @@ function messagesPrepare(messages: any[], refs: any[] = []) {
       message.content
     }<|im_end|>\n`);
   }, "");
-  logger.info("\n对话合并：\n" + content);
-  return [
-    {
-      role: "user",
-      contentType: "text",
-      content,
-    },
-    ...refs
-  ];
+  logger.info("\n对话合并：\n" + query);
+  return { query };
 }
 
 /**
@@ -418,42 +389,23 @@ async function receiveStream(stream: any): Promise<any> {
         const result = _.attempt(() => JSON.parse(event.data));
         if (_.isError(result))
           throw new Error(`Stream response invalid: ${event.data}`);
-        if (!data.id && result.sessionId) data.id = result.sessionId;
-        const text = (result.contents || []).reduce((str, part) => {
-          const { contentType, role, content } = part;
-          if (contentType != "text" && contentType != "text2image") return str;
-          if (role != "assistant" && !_.isString(content)) return str;
-          return str + content;
-        }, "");
-        const exceptCharIndex = text.indexOf("�");
-        let chunk = text.substring(
-          exceptCharIndex != -1
-            ? Math.min(data.choices[0].message.content.length, exceptCharIndex)
-            : data.choices[0].message.content.length,
-          exceptCharIndex == -1 ? text.length : exceptCharIndex
-        );
-        if (chunk && result.contentType == "text2image") {
-          chunk = chunk.replace(
-            /https?:\/\/[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\+.~#?&//=\,]*)/gi,
-            (url) => {
-              const urlObj = new URL(url);
-              urlObj.search = "";
-              return urlObj.toString();
-            }
+        const messages = result.data?.messages || [];
+        for (const part of messages) {
+          const { mime_type, content, status } = part;
+          if (
+            typeof content === "string" &&
+            ["text/plain", "multi_load/iframe", "bar/iframe"].includes(mime_type)
+          ) {
+            data.id = result.data?.communication?.sessionid || data.id;
+            data.choices[0].message.content = content;
+            if (status == "complete" || status == "finished")
+              return resolve(data);
+          }
+        }
+        if (result.error_code && result.error_code != 0)
+          throw new Error(
+            `服务响应错误：${result.error_msg || result.error_code}`
           );
-        }
-        if (result.msgStatus != "finished") {
-          if (result.contentType == "text")
-            data.choices[0].message.content += chunk;
-        } else {
-          data.choices[0].message.content += chunk;
-          if (!result.canShare)
-            data.choices[0].message.content +=
-              "\n[内容由于不合规被停止生成，我们换个话题吧]";
-          if (result.errorCode)
-            data.choices[0].message.content += `服务暂时不可用，第三方响应错误：${result.errorCode}`;
-          resolve(data);
-        }
       } catch (err) {
         logger.error(err);
         reject(err);
@@ -463,7 +415,7 @@ async function receiveStream(stream: any): Promise<any> {
     stream.on("data", (buffer) => parser.feed(buffer.toString()));
     stream.once("error", (err) => reject(err));
     stream.once("close", () => resolve(data));
-    stream.end();
+    stream.once("end", () => resolve(data));
   });
 }
 
@@ -480,7 +432,7 @@ function createTransStream(stream: any, endCallback?: Function) {
   const created = util.unixTimestamp();
   // 创建转换流
   const transStream = new PassThrough();
-  let content = "";
+  let content_prev = "";
   !transStream.closed &&
     transStream.write(
       `data: ${JSON.stringify({
@@ -505,57 +457,42 @@ function createTransStream(stream: any, endCallback?: Function) {
       const result = _.attempt(() => JSON.parse(event.data));
       if (_.isError(result))
         throw new Error(`Stream response invalid: ${event.data}`);
-      const text = (result.contents || []).reduce((str, part) => {
-        const { contentType, role, content } = part;
-        if (contentType != "text" && contentType != "text2image") return str;
-        if (role != "assistant" && !_.isString(content)) return str;
-        return str + content;
-      }, "");
-      const exceptCharIndex = text.indexOf("�");
-      let chunk = text.substring(
-        exceptCharIndex != -1
-          ? Math.min(content.length, exceptCharIndex)
-          : content.length,
-        exceptCharIndex == -1 ? text.length : exceptCharIndex
-      );
-      if (chunk && result.contentType == "text2image") {
-        chunk = chunk.replace(
-          /https?:\/\/[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\+.~#?&//=\,]*)/gi,
-          (url) => {
-            const urlObj = new URL(url);
-            urlObj.search = "";
-            return urlObj.toString();
-          }
-        );
-      }
-      if (result.msgStatus != "finished") {
-        if (chunk && result.contentType == "text") {
-          content += chunk;
+      const messages = result.data?.messages || [];
+      const sessionId = result.data?.communication?.sessionid || "";
+      let shouldEnd = false;
+      for (const part of messages) {
+        const { mime_type, content, status } = part;
+        if (
+          typeof content !== "string" ||
+          !["text/plain", "multi_load/iframe", "bar/iframe"].includes(mime_type)
+        )
+          continue;
+        // content为累积全文，取增量部分输出
+        if (content.length > content_prev.length) {
+          const delta_text = content.substring(content_prev.length);
+          content_prev = content;
           const data = `data: ${JSON.stringify({
-            id: result.sessionId,
+            id: sessionId,
             model: MODEL_NAME,
             object: "chat.completion.chunk",
             choices: [
-              { index: 0, delta: { content: chunk }, finish_reason: null },
+              { index: 0, delta: { content: delta_text }, finish_reason: null },
             ],
             created,
           })}\n\n`;
           !transStream.closed && transStream.write(data);
         }
-      } else {
-        const delta = { content: chunk || "" };
-        if (!result.canShare)
-          delta.content += "\n[内容由于不合规被停止生成，我们换个话题吧]";
-        if (result.errorCode)
-          delta.content += `服务暂时不可用，第三方响应错误：${result.errorCode}`;
+        if (status == "complete" || status == "finished") shouldEnd = true;
+      }
+      if (shouldEnd) {
         const data = `data: ${JSON.stringify({
-          id: result.sessionId,
+          id: sessionId,
           model: MODEL_NAME,
           object: "chat.completion.chunk",
           choices: [
             {
               index: 0,
-              delta,
+              delta: {},
               finish_reason: "stop",
             },
           ],
@@ -564,11 +501,10 @@ function createTransStream(stream: any, endCallback?: Function) {
         })}\n\n`;
         !transStream.closed && transStream.write(data);
         !transStream.closed && transStream.end("data: [DONE]\n\n");
-        content = "";
-        endCallback && endCallback(result.sessionId);
+        endCallback && endCallback(sessionId);
       }
-      // else
-      //   logger.warn(result.event, result);
+      if (result.error_code && result.error_code != 0)
+        throw new Error(`服务响应错误：${result.error_msg || result.error_code}`);
     } catch (err) {
       logger.error(err);
       !transStream.closed && transStream.end("\n\n");
@@ -584,7 +520,10 @@ function createTransStream(stream: any, endCallback?: Function) {
     "close",
     () => !transStream.closed && transStream.end("data: [DONE]\n\n")
   );
-  stream.end();
+  stream.once(
+    "end",
+    () => !transStream.closed && transStream.end("data: [DONE]\n\n")
+  );
   return transStream;
 }
 
@@ -607,15 +546,14 @@ async function receiveImages(
         const result = _.attempt(() => JSON.parse(event.data));
         if (_.isError(result))
           throw new Error(`Stream response invalid: ${event.data}`);
-        if (!convId && result.sessionId) convId = result.sessionId;
-        const text = (result.contents || []).reduce((str, part) => {
-          const { role, content } = part;
-          if (role != "assistant" && !_.isString(content)) return str;
-          return str + content;
-        }, "");
-        if (result.contentType == "text2image") {
+        const messages = result.data?.messages || [];
+        if (!convId) convId = result.data?.communication?.sessionid || "";
+        for (const part of messages) {
+          const { mime_type, content, status } = part;
+          if (typeof content !== "string") continue;
+          // 从文本与markdown卡片中提取图片URL
           const urls =
-            text.match(
+            content.match(
               /https?:\/\/[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\+.~#?&//=\,]*)/gi
             ) || [];
           urls.forEach((url) => {
@@ -623,18 +561,20 @@ async function receiveImages(
             urlObj.search = "";
             const imageUrl = urlObj.toString();
             if (imageUrls.indexOf(imageUrl) != -1) return;
-            imageUrls.push(imageUrl);
+            if (/(\.png|\.jpe?g|\.webp|\.gif)(\/|$)/i.test(imageUrl))
+              imageUrls.push(imageUrl);
           });
+          if (status == "complete" || status == "finished") {
+            if (imageUrls.length == 0)
+              throw new APIException(EX.API_IMAGE_GENERATION_FAILED);
+            return resolve({ convId, imageUrls });
+          }
         }
-        if (result.msgStatus == "finished") {
-          if (!result.canShare || imageUrls.length == 0)
-            throw new APIException(EX.API_CONTENT_FILTERED);
-          if (result.errorCode)
-            throw new APIException(
-              EX.API_REQUEST_FAILED,
-              `服务暂时不可用，第三方响应错误：${result.errorCode}`
-            );
-        }
+        if (result.error_code && result.error_code != 0)
+          throw new APIException(
+            EX.API_REQUEST_FAILED,
+            `服务暂时不可用，第三方响应错误：${result.error_msg || result.error_code}`
+          );
       } catch (err) {
         logger.error(err);
         reject(err);
@@ -644,6 +584,7 @@ async function receiveImages(
     stream.on("data", (buffer) => parser.feed(buffer.toString()));
     stream.once("error", (err) => reject(err));
     stream.once("close", () => resolve({ convId, imageUrls }));
+    stream.once("end", () => resolve({ convId, imageUrls }));
   });
 }
 
@@ -659,8 +600,9 @@ async function acquireUploadParams(ticket: string) {
     {
       timeout: 15000,
       headers: {
-        Cookie: generateCookie(ticket),
-        ...FAKE_HEADERS,
+        Cookie: `login_tongyi_ticket=${ticket}`,
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
       },
       validateStatus: () => true,
     }
@@ -756,7 +698,8 @@ async function uploadFile(fileUrl: string, ticket: string) {
     // 60秒超时
     timeout: 120000,
     headers: {
-      ...FAKE_HEADERS,
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
       "X-Requested-With": "XMLHttpRequest"
     }
   });
@@ -790,8 +733,9 @@ async function uploadFile(fileUrl: string, ticket: string) {
       {
         timeout: 15000,
         headers: {
-          Cookie: generateCookie(ticket),
-          ...FAKE_HEADERS,
+          Cookie: `login_tongyi_ticket=${ticket}`,
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
         },
         validateStatus: () => true,
       }
@@ -814,8 +758,9 @@ async function uploadFile(fileUrl: string, ticket: string) {
       {
         timeout: 15000,
         headers: {
-          Cookie: generateCookie(ticket),
-          ...FAKE_HEADERS,
+          Cookie: `login_tongyi_ticket=${ticket}`,
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
         },
         validateStatus: () => true,
       }
@@ -834,8 +779,9 @@ async function uploadFile(fileUrl: string, ticket: string) {
         {
           timeout: 15000,
           headers: {
-            Cookie: generateCookie(ticket),
-            ...FAKE_HEADERS,
+            Cookie: `login_tongyi_ticket=${ticket}`,
+            "user-agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
           },
           validateStatus: () => true,
         }
@@ -868,56 +814,28 @@ function tokenSplit(authorization: string) {
 }
 
 /**
- * 生成Cookies
- *
- * @param ticket login_tongyi_ticket值
- */
-function generateCookie(ticket: string) {
-  return [
-    `login_tongyi_ticket=${ticket}`,
-    "_samesite_flag_=true",
-    `t=${util.uuid(false)}`,
-    "channel=oug71n2fX3Jd5ualEfKACRvnsceUtpjUC5jHBpfWnSOXKhkvBNuSO8bG3v4HHjCgB722h7LqbHkB6sAxf3OvgA%3D%3D",
-    "currentRegionId=cn-shenzhen",
-    "aliyun_country=CN",
-    "aliyun_lang=zh",
-    "aliyun_site=CN",
-    // `login_aliyunid_csrf=_csrf_tk_${util.generateRandomString({ charset: 'numeric', length: 15 })}`,
-    // `cookie2=${util.uuid(false)}`,
-    // `munb=22${util.generateRandomString({ charset: 'numeric', length: 11 })}`,
-    // `csg=`,
-    // `_tb_token_=${util.generateRandomString({ length: 10, capitalization: 'lowercase' })}`,
-    // `cna=`,
-    // `cnaui=`,
-    // `atpsida=`,
-    // `isg=`,
-    // `tfstk=`,
-    // `aui=`,
-    // `sca=`
-  ].join("; ");
-}
-
-/**
  * 获取Token存活状态
  */
 async function getTokenLiveStatus(ticket: string) {
-  const result = await axios.post(
-    "https://qianwen.biz.aliyun.com/dialog/session/list",
-    {},
-    {
-      headers: {
-        Cookie: generateCookie(ticket),
-        ...FAKE_HEADERS,
-      },
-      timeout: 15000,
-      validateStatus: () => true,
-    }
-  );
   try {
-    const { data } = checkResult(result);
-    return _.isArray(data);
-  }
-  catch(err) {
+    const result = await axios.post(
+      "https://qianwen.biz.aliyun.com/dialog/session/list",
+      {},
+      {
+        headers: {
+          Cookie: `login_tongyi_ticket=${ticket}`,
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+          origin: "https://www.qianwen.com",
+          referer: "https://www.qianwen.com/",
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      }
+    );
+    const { success, data } = result.data || {};
+    return _.isBoolean(success) ? success && _.isArray(data) : false;
+  } catch (err) {
     return false;
   }
 }
