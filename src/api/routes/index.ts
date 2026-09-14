@@ -10,7 +10,15 @@ export default [
     {
         get: {
             '/': async () => {
-                const content = await fs.readFile('public/welcome.html');
+                let content;
+                try {
+                    content = await fs.readFile('public/welcome.html');
+                } catch (err) {
+                    // exe 打包场景无独立 public 目录，返回内联欢迎页
+                    content = Buffer.from(
+                        '<h1>qwen-free-api</h1><p>Service is running.</p>'
+                    );
+                }
                 return new Response(content, {
                     type: 'html',
                     headers: {

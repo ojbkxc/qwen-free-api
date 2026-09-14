@@ -40,5 +40,13 @@ class Environment {
 export default new Environment({
     cmdArgs,
     envVars,
-    package: JSON.parse(fs.readFileSync(path.join(path.resolve(), "package.json")).toString())
+    package: (() => {
+        try {
+            const pkgPath = path.join(path.resolve(), "package.json");
+            if (fs.pathExistsSync(pkgPath))
+                return JSON.parse(fs.readFileSync(pkgPath).toString());
+        } catch (err) {}
+        // exe 打包场景无外部 package.json，回退到内置信息
+        return { name: "qwen-free-api", version: "1.0.0" };
+    })(),
 });

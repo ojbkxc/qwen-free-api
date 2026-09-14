@@ -61,7 +61,7 @@ jobs:
       - name: Build CJS bundle (all deps inlined)
         run: |
           npm install
-          npx tsup src/index.ts --format cjs --clean --publicDir public --noExternal '*'
+          npx tsup --config tsup.exe.config.ts
 
       - name: Package Windows x64 exe
         run: |
