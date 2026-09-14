@@ -47,6 +47,6 @@ export default new Environment({
                 return JSON.parse(fs.readFileSync(pkgPath).toString());
         } catch (err) {}
         // exe 打包场景无外部 package.json，回退到内置信息
-        return { name: "qwen-free-api", version: "1.0.0" };
+        return { name: "qwen-free-api", version: "1.0.1" };
     })(),
 });
