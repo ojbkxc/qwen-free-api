@@ -46,3 +46,43 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  build-windows-exe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build CJS bundle (all deps inlined)
+        run: |
+          npm install
+          npx tsup src/index.ts --format cjs --clean --publicDir public --noExternal '*'
+
+      - name: Package Windows x64 exe
+        run: |
+          npm install -g @yao-pkg/pkg
+          pkg dist/index.cjs -t node20-win-x64 -o qwen-free-api-windows-x64.exe
+
+      - name: Verify exe size
+        run: ls -lh qwen-free-api-windows-x64.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen-free-api-windows-x64
+          path: qwen-free-api-windows-x64.exe
+
+      - name: Upload to latest release
+        if: github.ref == 'refs/heads/main'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: qwen-free-api-windows-x64.exe
+          asset_name: qwen-free-api-windows-x64.exe
+          tag: v1.0.0
+          overwrite: true
