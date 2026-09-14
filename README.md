@@ -18,21 +18,19 @@
   * [AI绘图](#AI绘图)
   * [文档解读](#文档解读)
   * [图像解析](#图像解析)
-  * [login_tongyi_ticket存活检测](#login_tongyi_ticket存活检测)
+  * [tongyi_sso_ticket存活检测](#tongyi_sso_ticket存活检测)
 * [注意事项](#注意事项)
   * [Nginx反代优化](#Nginx反代优化)
 
 ## 接入准备
 
-从 [通义千问](https://tongyi.aliyun.com/qianwen) 登录
+从 [千问](https://www.qianwen.com) 登录
 
-进入通义千问随便发起一个对话，然后F12打开开发者工具，从Application > Cookies中找到`login_tongyi_ticket`的值，这将作为Authorization的Bearer Token值：`Authorization: Bearer TOKEN`
-
-![获取login_tongyi_ticket](./doc/example-0.png)
+进入千问随便发起一个对话，然后F12打开开发者工具，从Application > Cookies中找到`tongyi_sso_ticket`的值，这将作为Authorization的Bearer Token值：`Authorization: Bearer TOKEN`
 
 ### 多账号接入
 
-你可以通过提供多个账号的login_tongyi_ticket，并使用,拼接提供：
+你可以通过提供多个账号的tongyi_sso_ticket，并使用,拼接提供：
 
 Authorization: Bearer TOKEN1,TOKEN2,TOKEN3
 
@@ -170,7 +168,7 @@ pm2 stop qwen-free-api
 header 需要设置 Authorization 头部：
 
 ```
-Authorization: Bearer [login_tongyi_ticket]
+Authorization: Bearer [tongyi_sso_ticket]
 ```
 
 请求数据：
@@ -223,7 +221,7 @@ Authorization: Bearer [login_tongyi_ticket]
 header 需要设置 Authorization 头部：
 
 ```
-Authorization: Bearer [login_tongyi_ticket]
+Authorization: Bearer [tongyi_sso_ticket]
 ```
 
 请求数据：
@@ -371,7 +369,7 @@ Authorization: Bearer [refresh_token]
 }
 ```
 
-### login_tongyi_ticket存活检测
+### tongyi_sso_ticket存活检测
 
 检测login_tongyi_ticket是否存活，如果存活live未true，否则为false，请不要频繁（小于10分钟）调用此接口。
 
