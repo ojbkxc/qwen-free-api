@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  qwen-free-api:
+    image: ojbkxc/qwen-free-api:latest
+    container_name: qwen-free-api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - TZ=Asia/Shanghai
+      # 对话完成后自动删除上游会话（默认开启；设为 false 关闭）
+      - QWEN_AUTO_DELETE=true

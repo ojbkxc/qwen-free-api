@@ -43,7 +43,7 @@ Authorization: Bearer TOKEN1,TOKEN2,TOKEN3
 拉取镜像并启动服务
 
 ```shell
-docker run -it -d --init --name qwen-free-api -p 8000:8000 -e TZ=Asia/Shanghai vinlic/qwen-free-api:latest
+docker run -it -d --init --name qwen-free-api -p 8000:8000 -e TZ=Asia/Shanghai ojbkxc/qwen-free-api:latest
 ```
 
 查看服务实时日志
@@ -72,12 +72,14 @@ version: '3'
 services:
   qwen-free-api:
     container_name: qwen-free-api
-    image: vinlic/qwen-free-api:latest
+    image: ojbkxc/qwen-free-api:latest
     restart: always
     ports:
       - "8000:8000"
     environment:
       - TZ=Asia/Shanghai
+      # 对话完成后自动删除上游会话（默认开启；设为 false 关闭）
+      - QWEN_AUTO_DELETE=true
 ```
 
 ### Render部署
@@ -174,7 +176,7 @@ Authorization: Bearer [tongyi_sso_ticket]
 请求数据：
 ```json
 {
-    // 模型名称随意填写
+    // 可用模型：qwen（默认 Qwen）、qwen3.6-flash、qwen3.7-max、qwen3.8-max
     "model": "qwen",
     "messages": [
         {
@@ -411,3 +413,19 @@ keepalive_timeout 120;
 ### Token统计
 
 由于推理侧不在qwen-free-api，因此token不可统计，将以固定数字返回。
+
+### 会话自动删除
+
+对话/绘图完成后服务会自动删除上游（千问网页版）对应的会话记录，避免对话列表堆积。
+
+- 开关通过环境变量 `QWEN_AUTO_DELETE` 控制，默认开启
+- 设为 `false` 关闭（如 `docker run` 时加 `-e QWEN_AUTO_DELETE=false`）
+
+### 可用模型
+
+| model 参数 | 上游模型 |
+| --- | --- |
+| `qwen`（默认，或其他任意值回退） | Qwen |
+| `qwen3.6-flash` | Qwen3.6-Flash |
+| `qwen3.7-max` | Qwen3.7-Max |
+| `qwen3.8-max` | Qwen3.8-Max |

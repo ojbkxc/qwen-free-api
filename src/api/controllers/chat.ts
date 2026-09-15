@@ -2,6 +2,7 @@ import { URL } from "url";
 import { PassThrough } from "stream";
 import https from "https";
 import path from "path";
+import crypto from "crypto";
 import _ from "lodash";
 import mime from "mime";
 import FormData from "form-data";
@@ -20,35 +21,108 @@ const MODEL_NAME = "qwen";
 const MAX_RETRY_COUNT = 3;
 // 重试延迟
 const RETRY_DELAY = 5000;
-// 新版对话接口主机
-const CHAT_HOST = "chat2.qianwen.com";
-// 文件最大大小
-const FILE_MAX_SIZE = 100 * 1024 * 1024;
 
 /**
- * 移除会话
+ * 解析模型：把 OpenAI 侧传入的 model 映射到千问网页版 body 的 model 值
  *
- * 在对话流传输完毕后移除会话，避免创建的会话出现在用户的对话列表中
+ * 支持四个模型：
+ *  - Qwen          (默认，即 Qwen3.7)
+ *  - Qwen3.6-Flash
+ *  - Qwen3.7-Max
+ *  - Qwen3.8-Max
+ */
+function resolveModel(model?: string): string {
+  const raw = String(model || "").trim();
+  if (!raw || raw.toLowerCase() === "qwen") return "Qwen";
+  const key = raw.toLowerCase().replace(/[\s_\-.]/g, "");
+  if (key.includes("flash")) return "Qwen3.6-Flash";
+  if (key.includes("38")) return "Qwen3.8-Max";
+  if (key.includes("36")) return "Qwen3.6-Flash";
+  if (key.includes("max")) return "Qwen3.7-Max";
+  logger.warn(`未知模型 "${raw}"，已回退到默认模型 Qwen`);
+  return "Qwen";
+}
+// 新版对话接口主机
+const CHAT_HOST = "chat2.qianwen.com";
+// 会话管理接口主机（qianwen.com 前端 CHAT_NA 域）
+const SESSION_HOST = "chat2-api.qianwen.com";
+// 文件最大大小
+const FILE_MAX_SIZE = 100 * 1024 * 1024;
+// 对话完成后是否自动删除上游会话（环境变量 QWEN_AUTO_DELETE=false 关闭）
+let autoDeleteChat = process.env.QWEN_AUTO_DELETE !== "false";
+
+/**
+ * 会话管理接口公共请求头
  *
+ * /api/v2/session/* 系接口挂在 chat2-api.qianwen.com，仅需 tongyi_sso_ticket
+ * cookie 与 ut 等基础 query 参数，无需 clt-acs 风控签名
+ */
+function sessionRequestOptions(path: string, ticket: string, data: any) {
+  const query: Record<string, string> = {
+    biz_id: "ai_qwen",
+    fe_version: "1.0.0",
+    chat_client: "h5",
+    device: "pc",
+    fr: "pc",
+    pr: "qwen",
+    ut: crypto.randomUUID(),
+    la: "zh-CN",
+    tz: "Asia/Shanghai",
+    wv: "4.6.4",
+    ve: "4.6.4",
+    nonce: crypto.randomBytes(6).toString("hex").slice(0, 11),
+    timestamp: String(Date.now()),
+  };
+  const qs = Object.entries(query)
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join("&");
+  return {
+    url: `https://${SESSION_HOST}${path}?${qs}`,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `tongyi_sso_ticket=${ticket}`,
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+      origin: "https://www.qianwen.com",
+      referer: "https://www.qianwen.com/",
+      "x-platform": "pc_tongyi",
+      "x-device-id": query.ut,
+      prod_id: "tongyi",
+    },
+    data,
+    timeout: 15000,
+    validateStatus: () => true,
+  } as any;
+}
+
+/**
+ * 删除上游会话
+ *
+ * session_id 由本地 generateIds() 生成并随对话请求体发送，上游直接
+ * 以该 id 建会话，因此对话完成后用同一 id 调 delete/batch 即可，
+ * 无需从 SSE 响应中提取。
+ *
+ * @param sessionId 本地生成的会话 ID
  * @param ticket tongyi_sso_ticket值
  */
-async function removeConversation(convId: string, ticket: string) {
-  const result = await axios.post(
-    `https://qianwen.biz.aliyun.com/dialog/session/delete`,
-    {
-      sessionId: convId,
-    },
-    {
-      headers: {
-        Cookie: `login_tongyi_ticket=${ticket}`,
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
-      },
-      timeout: 15000,
-      validateStatus: () => true,
-    }
-  );
-  checkResult(result);
+async function removeConversation(sessionId: string, ticket: string) {
+  if (!autoDeleteChat || !sessionId) return;
+  try {
+    const result = await axios.request(
+      sessionRequestOptions("/api/v1/session/delete/batch", ticket, {
+        session_ids: [sessionId],
+      })
+    );
+    if (result.data?.code == 0)
+      logger.success(`已删除上游会话 ${sessionId}`);
+    else
+      logger.warn(
+        `删除上游会话失败 ${sessionId}: [${result.status}] ${JSON.stringify(result.data).slice(0, 120)}`
+      );
+  } catch (err: any) {
+    logger.warn(`删除上游会话异常 ${sessionId}: ${err.message}`);
+  }
 }
 
 /**
@@ -70,7 +144,8 @@ async function createCompletion(
 
     const { reqId, sessionId } = qiansign.generateIds();
     const { query } = messagesPrepare(messages);
-    const body = buildRequestBody(reqId, sessionId, query);
+    const chatModel = resolveModel(model);
+    const body = buildRequestBody(reqId, sessionId, query, chatModel);
 
     const { path, body: bodyStr, headers } = await qiansign.signChatRequest(
       ticket,
@@ -79,10 +154,13 @@ async function createCompletion(
 
     const stream = await requestChatStream(path, bodyStr, headers);
     const streamStartTime = util.timestamp();
-    const answer = await receiveStream(stream);
+    const answer = await receiveStream(stream, chatModel);
     logger.success(
       `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
     );
+
+    // 对话完成后移除上游会话，避免出现在用户的对话列表中
+    removeConversation(sessionId, ticket).catch(() => {});
 
     return answer;
   })().catch((err) => {
@@ -101,7 +179,12 @@ async function createCompletion(
 /**
  * 构造新版接口请求体
  */
-function buildRequestBody(reqId: string, sessionId: string, query: string) {
+function buildRequestBody(
+  reqId: string,
+  sessionId: string,
+  query: string,
+  model = "Qwen"
+) {
   return {
     req_id: reqId,
     parent_req_id: "0",
@@ -119,7 +202,7 @@ function buildRequestBody(reqId: string, sessionId: string, query: string) {
     session_id: sessionId,
     biz_id: "ai_qwen",
     topic_id: reqId,
-    model: "Qwen",
+    model,
     from: "default",
     protocol_version: "v2",
     messages_merge: false,
@@ -199,7 +282,8 @@ async function createCompletionStream(
 
     const { reqId, sessionId } = qiansign.generateIds();
     const { query } = messagesPrepare(messages);
-    const body = buildRequestBody(reqId, sessionId, query);
+    const chatModel = resolveModel(model);
+    const body = buildRequestBody(reqId, sessionId, query, chatModel);
 
     const { path, body: bodyStr, headers } = await qiansign.signChatRequest(
       ticket,
@@ -209,11 +293,17 @@ async function createCompletionStream(
     const stream = await requestChatStream(path, bodyStr, headers);
     const streamStartTime = util.timestamp();
     // 创建转换流将消息格式转换为gpt兼容格式
-    return createTransStream(stream, () => {
-      logger.success(
-        `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
-      );
-    });
+    return createTransStream(
+      stream,
+      () => {
+        logger.success(
+          `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
+        );
+        // 流结束后移除上游会话，避免出现在用户的对话列表中
+        removeConversation(sessionId, ticket).catch(() => {});
+      },
+      chatModel
+    );
   })().catch((err) => {
     if (retryCount < MAX_RETRY_COUNT) {
       logger.error(`Stream response error: ${err.message}`);
@@ -267,6 +357,9 @@ async function generateImages(
 
     if (imageUrls.length == 0)
       throw new APIException(EX.API_IMAGE_GENERATION_FAILED);
+
+    // 绘图完成后移除上游会话
+    removeConversation(sessionId, ticket).catch(() => {});
 
     return imageUrls;
   })().catch((err) => {
@@ -364,12 +457,12 @@ function checkResult(result: AxiosResponse) {
  *
  * @param stream 消息流
  */
-async function receiveStream(stream: any): Promise<any> {
+async function receiveStream(stream: any, model = MODEL_NAME): Promise<any> {
   return new Promise((resolve, reject) => {
     // 消息初始化
     const data = {
       id: "",
-      model: MODEL_NAME,
+      model,
       object: "chat.completion",
       choices: [
         {
@@ -427,7 +520,11 @@ async function receiveStream(stream: any): Promise<any> {
  * @param stream 消息流
  * @param endCallback 传输结束回调
  */
-function createTransStream(stream: any, endCallback?: Function) {
+function createTransStream(
+  stream: any,
+  endCallback?: Function,
+  model = MODEL_NAME
+) {
   // 消息创建时间
   const created = util.unixTimestamp();
   // 创建转换流
@@ -437,7 +534,7 @@ function createTransStream(stream: any, endCallback?: Function) {
     transStream.write(
       `data: ${JSON.stringify({
         id: "",
-        model: MODEL_NAME,
+        model,
         object: "chat.completion.chunk",
         choices: [
           {
@@ -473,7 +570,7 @@ function createTransStream(stream: any, endCallback?: Function) {
           content_prev = content;
           const data = `data: ${JSON.stringify({
             id: sessionId,
-            model: MODEL_NAME,
+            model,
             object: "chat.completion.chunk",
             choices: [
               { index: 0, delta: { content: delta_text }, finish_reason: null },
@@ -487,7 +584,7 @@ function createTransStream(stream: any, endCallback?: Function) {
       if (shouldEnd) {
         const data = `data: ${JSON.stringify({
           id: sessionId,
-          model: MODEL_NAME,
+          model,
           object: "chat.completion.chunk",
           choices: [
             {
